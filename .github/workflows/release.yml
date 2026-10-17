@@ -6,7 +6,7 @@
 # la vérification du paquet ou l'essai de l'installateur échoue.
 #
 # Étiquette : <produit>-v<version> (tsa-v0.1.0, tsalab-v0.2.0-rc.1). Fichiers : installateur, archive portable,
-# source de Gmsh (GPL), SHA256SUMS.txt.
+# source de Gmsh (GPL), source d'IfcOpenShell (LGPL), SHA256SUMS.txt.
 
 name: Publier une version
 
@@ -37,6 +37,8 @@ env:
   OCCT_VERSION: 8.0.1
   GMSH_VERSION: 4.15.2
   OPENSEES_VERSION: 3.8.0
+  IFCOPENSHELL_VERSION: 0.9.0post1
+  IFCOPENSHELL_SHA256: 2776eef7ddc0137df317f0294623523dc4ccdaba468c172232cfdda13f4e912a
 
 jobs:
   windows:
@@ -146,10 +148,29 @@ jobs:
       - name: Ninja et Inno Setup
         run: choco install ninja innosetup -y --no-progress
 
+      # Import IFC complet : IfcOpenShell (LGPL-3.0) compilé contre l'OCCT de TSA par le script du dépôt (versions et
+      # empreintes figées). Cache indexé sur le script : toute modification le recompile.
+      - name: IfcOpenShell en cache
+        id: ifcos-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            TSA/thirdparty/ifcopenshell-${{ env.IFCOPENSHELL_VERSION }}
+            TSA/thirdparty/boost-1.92.0
+            TSA/thirdparty/eigen-3.4.1
+          key: win-ifcopenshell${{ env.IFCOPENSHELL_VERSION }}-occt${{ env.OCCT_VERSION }}-${{ hashFiles('TSA/scripts/build_ifcopenshell.ps1') }}
+
+      - name: Compilation d'IfcOpenShell
+        if: steps.ifcos-cache.outputs.cache-hit != 'true'
+        run: |
+          ./TSA/scripts/build_ifcopenshell.ps1 -WorkDir "$env:RUNNER_TEMP/ifcos"
+          Get-Content "TSA/thirdparty/ifcopenshell-$env:IFCOPENSHELL_VERSION/TSA-BUILD.json"
+
       - name: Configuration
         run: >
           cmake -S ${{ steps.prod.outputs.name }} -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
+          -DTSA_REQUIRE_IFCOPENSHELL=ON
           -DTSA_PACKAGE_GMSH=ON
           -DTSA_BUILD_TESTS=ON
           -DTSA_SOURCE_REF=${{ steps.src.outputs.commit }}
@@ -176,7 +197,8 @@ jobs:
           $inst = Join-Path $env:RUNNER_TEMP "inst-$name"
           $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$inst`"", "/LOG=`"$env:RUNNER_TEMP\install.log`"" -Wait -PassThru
           if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\install.log" -Tail 40; throw "installation : code $($p.ExitCode)" }
-          foreach ($f in "$name.exe", 'LICENSE.txt', 'MANIFEST.json', 'licenses/Gmsh/SOURCE.txt') {
+          foreach ($f in "$name.exe", 'LICENSE.txt', 'MANIFEST.json', 'licenses/Gmsh/SOURCE.txt', 'ifcopenshell.parse.dll',
+                         'ifcopenshell_geometry_kernel_opencascade.dll', 'licenses/IfcOpenShell/COPYING.LESSER', 'licenses/IfcOpenShell/SOURCE.txt') {
             if (-not (Test-Path (Join-Path $inst $f))) { throw "absent après installation : $f" }
           }
           $u = Start-Process (Join-Path $inst 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
@@ -208,10 +230,15 @@ jobs:
           path: out
           merge-multiple: true
 
-      # GPL de Gmsh : une copie non modifiée de la source accompagne chaque version (licenses/Gmsh/SOURCE.txt).
-      - name: Source de Gmsh et empreintes
+      # GPL de Gmsh et LGPL d'IfcOpenShell : une copie non modifiée de chaque source accompagne chaque version
+      # (licenses/Gmsh/SOURCE.txt, licenses/IfcOpenShell/SOURCE.txt) ; l'archive d'IfcOpenShell est vérifiée par son
+      # empreinte, la même que celle du script de compilation.
+      - name: Sources de Gmsh et d'IfcOpenShell, empreintes
         run: |
           curl -fsSL -o "out/gmsh-${GMSH_VERSION}-source.tgz" "https://gmsh.info/src/gmsh-${GMSH_VERSION}-source.tgz"
+          curl -fsSL -o "out/ifcopenshell-${IFCOPENSHELL_VERSION}-source.tar.gz" \
+            "https://github.com/IfcOpenShell/IfcOpenShell/archive/refs/tags/ifcopenshell-python-${IFCOPENSHELL_VERSION}.tar.gz"
+          echo "${IFCOPENSHELL_SHA256}  out/ifcopenshell-${IFCOPENSHELL_VERSION}-source.tar.gz" | sha256sum -c -
           cd out
           for f in *; do [ -s "$f" ] || { echo "fichier vide : $f"; exit 1; }; done
           sha256sum * > SHA256SUMS.txt
@@ -239,6 +266,7 @@ jobs:
             echo "- TSA : https://github.com/ChristinotLeonnel/Tsaraloha-Structural-Analysis/tree/$COMMIT_TSA"
             echo "- TSALab : https://github.com/ChristinotLeonnel/Tsaraloha-Structural-Analysis-Virtual-Laboratory/tree/$COMMIT_TSALAB"
             echo "Cette version contient Gmsh ${GMSH_VERSION} (GNU GPL) : elle est distribuée, dans son ensemble, selon les termes de la GPL ; source de Gmsh jointe (\`gmsh-${GMSH_VERSION}-source.tgz\`)."
+            echo "Import IFC par IfcOpenShell ${IFCOPENSHELL_VERSION} (GNU LGPL v3, DLL remplaçables) : source jointe (\`ifcopenshell-${IFCOPENSHELL_VERSION}-source.tar.gz\`), script de compilation dans le dépôt de TSA (\`scripts/build_ifcopenshell.ps1\`)."
             echo "OpenSees ${OPENSEES_VERSION} est livré sous sa propre licence (usage éducatif, de recherche et non lucratif sans accord de l'Université de Californie)."
             echo
             echo "Les fichiers ne sont pas signés : Windows SmartScreen peut afficher un avertissement. Les résultats de calcul doivent être vérifiés par un ingénieur qualifié."
