@@ -151,6 +151,7 @@ jobs:
           cmake -S ${{ steps.prod.outputs.name }} -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DTSA_PACKAGE_GMSH=ON
+          -DTSA_BUILD_TESTS=ON
           -DTSA_SOURCE_REF=${{ steps.src.outputs.commit }}
           -DTSA_EXTRA_SOURCE_URLS=${{ steps.src.outputs.extra_source }}
 
@@ -160,7 +161,8 @@ jobs:
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ctest --test-dir build --output-on-failure --timeout 1800
+        # --no-tests=error : une suite introuvable est un échec, jamais un succès silencieux.
+        run: ctest --test-dir build --output-on-failure --no-tests=error --timeout 1800
 
       - name: Paquet, vérification et installateur
         run: |
