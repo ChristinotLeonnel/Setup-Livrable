@@ -1,0 +1,251 @@
+# Publication d'une version de TSA ou de TSALab dans les Releases de ce dépôt (téléchargées par le site).
+#
+# Lancement manuel (Actions > Publier une version > Run workflow). Le code est pris dans le dépôt public du
+# produit, au commit `ref` ; la version demandée doit être celle de product/ProductIdentity.h. Aucune Release
+# n'est créée si `publish` est décoché (essai : fichiers disponibles comme artefacts du flux), ni si un test,
+# la vérification du paquet ou l'essai de l'installateur échoue.
+#
+# Étiquette : <produit>-v<version> (tsa-v0.1.0, tsalab-v0.2.0-rc.1). Fichiers : installateur, archive portable,
+# source de Gmsh (GPL), SHA256SUMS.txt.
+
+name: Publier une version
+
+on:
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Logiciel
+        type: choice
+        options: [tsa, tsalab]
+        default: tsa
+      version:
+        description: Version (celle de ProductIdentity.h, ex. 0.1.0 ou 0.2.0-rc.1)
+        required: true
+      ref:
+        description: Branche, étiquette ou commit du dépôt du code
+        default: main
+      publish:
+        description: Créer la Release (sinon essai sans publication)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  QT_VERSION: 6.11.2
+  OCCT_VERSION: 8.0.1
+  GMSH_VERSION: 4.15.2
+  OPENSEES_VERSION: 3.8.0
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 180
+    outputs:
+      commit: ${{ steps.src.outputs.commit }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Produit
+        id: prod
+        run: |
+          $p = '${{ inputs.product }}'
+          $name = @{ tsa = 'TSA'; tsalab = 'TSALab' }[$p]
+          $repo = @{ tsa = 'Tsaraloha-Structural-Analysis'; tsalab = 'Tsaraloha-Structural-Analysis-Virtual-Laboratory' }[$p]
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "repo=ChristinotLeonnel/$repo" >> $env:GITHUB_OUTPUT
+
+      # TSALab se construit sur les bibliothèques de TSA (dossier voisin ../TSA).
+      - name: Code de TSA
+        uses: actions/checkout@v4
+        with:
+          repository: ChristinotLeonnel/Tsaraloha-Structural-Analysis
+          ref: ${{ inputs.product == 'tsa' && inputs.ref || 'main' }}
+          path: TSA
+      - name: Code de TSALab
+        if: inputs.product == 'tsalab'
+        uses: actions/checkout@v4
+        with:
+          repository: ChristinotLeonnel/Tsaraloha-Structural-Analysis-Virtual-Laboratory
+          ref: ${{ inputs.ref }}
+          path: TSALab
+
+      - name: Commit et version
+        id: src
+        run: |
+          $dir = '${{ steps.prod.outputs.name }}'
+          $commit = git -C $dir rev-parse HEAD
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+          $declared = (Select-String -Path "$dir/product/ProductIdentity.h" -Pattern 'kVersion\[\] = "([^"]+)"').Matches[0].Groups[1].Value
+          if ($declared -ne '${{ inputs.version }}') { throw "Version demandée ${{ inputs.version }} ≠ ProductIdentity.h $declared" }
+          Write-Host "$dir $declared au commit $commit"
+
+      - name: Dépendances en cache
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: win-occt${{ env.OCCT_VERSION }}-gmsh${{ env.GMSH_VERSION }}-opensees${{ env.OPENSEES_VERSION }}
+
+      # Sources officielles uniquement : versions publiées d'OCCT (GitHub), SDK de Gmsh (gmsh.info),
+      # exécutable d'OpenSees (Université de Californie, Berkeley).
+      - name: Téléchargement des dépendances
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          New-Item -ItemType Directory -Force deps, dl | Out-Null
+          $occt = "https://github.com/Open-Cascade-SAS/OCCT/releases/download/V$env:OCCT_VERSION"
+          Invoke-WebRequest "$occt/opencascade-release-no-pch.zip" -OutFile dl/occt.zip
+          Expand-Archive dl/occt.zip dl/occt
+          Expand-Archive (Get-ChildItem dl/occt -Filter *.zip).FullName deps
+          Invoke-WebRequest "$occt/3rdparty-vc14-64.zip" -OutFile dl/3rdparty.zip
+          Expand-Archive dl/3rdparty.zip dl/3rdparty
+          $inner = Get-ChildItem dl/3rdparty -Filter *.zip
+          if ($inner) { Expand-Archive $inner[0].FullName deps } else { Move-Item dl/3rdparty/* deps }
+          Invoke-WebRequest "https://gmsh.info/bin/Windows/gmsh-$env:GMSH_VERSION-Windows64-sdk.zip" -OutFile dl/gmsh.zip
+          Expand-Archive dl/gmsh.zip deps
+          Invoke-WebRequest "https://opensees.berkeley.edu/OpenSees/code/OpenSees$env:OPENSEES_VERSION-x64.exe.zip" -OutFile dl/opensees.zip
+          Expand-Archive dl/opensees.zip dl/opensees
+          Move-Item "dl/opensees/OpenSees$env:OPENSEES_VERSION" deps/OpenSees
+          Get-ChildItem deps | Format-Table Name
+
+      - name: Dépendances à leur place
+        run: |
+          Copy-Item -Recurse "deps/opencascade-$env:OCCT_VERSION-vc14-64" TSA/
+          Copy-Item -Recurse deps/3rdparty-vc14-64 TSA/
+          New-Item -ItemType Directory -Force TSA/thirdparty | Out-Null
+          Copy-Item -Recurse "deps/gmsh-$env:GMSH_VERSION-Windows64-sdk" TSA/thirdparty/
+          Copy-Item -Recurse deps/OpenSees TSA/thirdparty/
+          Get-ChildItem TSA/thirdparty, TSA/thirdparty/OpenSees -Recurse -Depth 1 | Select-Object -First 20 FullName
+
+      - name: Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Compilateur MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Ninja et Inno Setup
+        run: choco install ninja innosetup -y --no-progress
+
+      - name: Configuration
+        run: >
+          cmake -S ${{ steps.prod.outputs.name }} -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DTSA_PACKAGE_GMSH=ON
+          -DTSA_SOURCE_REF=${{ steps.src.outputs.commit }}
+
+      - name: Compilation
+        run: cmake --build build
+
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build --output-on-failure --timeout 1800
+
+      - name: Paquet, vérification et installateur
+        run: |
+          cmake --build build --target installer_${{ steps.prod.outputs.name }}
+          python TSA/tools/verify_package.py build/dist/${{ steps.prod.outputs.name }}
+
+      - name: Essai de l'installateur (installation, démarrage, désinstallation)
+        run: |
+          $name = '${{ steps.prod.outputs.name }}'
+          $setup = (Resolve-Path "build/dist/$name-${{ inputs.version }}-windows-x64-setup.exe").Path
+          $inst = Join-Path $env:RUNNER_TEMP "inst-$name"
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$inst`"", "/LOG=`"$env:RUNNER_TEMP\install.log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\install.log" -Tail 40; throw "installation : code $($p.ExitCode)" }
+          foreach ($f in "$name.exe", 'LICENSE.txt', 'MANIFEST.json', 'licenses/Gmsh/SOURCE.txt') {
+            if (-not (Test-Path (Join-Path $inst $f))) { throw "absent après installation : $f" }
+          }
+          $u = Start-Process (Join-Path $inst 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          for ($t = 0; $t -lt 60 -and (Test-Path (Join-Path $inst "$name.exe")); $t++) { Start-Sleep 1 }
+          if (Test-Path (Join-Path $inst "$name.exe")) { throw 'désinstallation incomplète' }
+          Write-Host "installation et désinstallation : OK"
+
+      - name: Fichiers de la version
+        run: |
+          $name = '${{ steps.prod.outputs.name }}'
+          $v = '${{ inputs.version }}'
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item "build/dist/$name-$v-windows-x64-setup.exe" out/
+          Compress-Archive -Path "build/dist/$name/*" -DestinationPath "out/$name-$v-windows-x64.zip"
+          Get-ChildItem out | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/
+          if-no-files-found: error
+
+  publish:
+    needs: [windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      # GPL de Gmsh : une copie non modifiée de la source accompagne chaque version (licenses/Gmsh/SOURCE.txt).
+      - name: Source de Gmsh et empreintes
+        run: |
+          curl -fsSL -o "out/gmsh-${GMSH_VERSION}-source.tgz" "https://gmsh.info/src/gmsh-${GMSH_VERSION}-source.tgz"
+          cd out
+          for f in *; do [ -s "$f" ] || { echo "fichier vide : $f"; exit 1; }; done
+          sha256sum * > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Notes de publication
+        env:
+          COMMIT: ${{ needs.windows.outputs.commit }}
+        run: |
+          case "${{ inputs.product }}" in
+            tsa) name=TSA; repo=Tsaraloha-Structural-Analysis ;;
+            *)   name=TSALab; repo=Tsaraloha-Structural-Analysis-Virtual-Laboratory ;;
+          esac
+          {
+            echo "$name ${{ inputs.version }} pour Windows 10/11 x64."
+            echo
+            echo "- **Installateur** : \`$name-${{ inputs.version }}-windows-x64-setup.exe\` (pour l'utilisateur courant, sans droits administrateur)."
+            echo "- **Version portable** : \`$name-${{ inputs.version }}-windows-x64.zip\`."
+            echo "- **Empreintes SHA-256** : \`SHA256SUMS.txt\`. Vérification : \`(Get-FileHash -Algorithm SHA256 <fichier>).Hash.ToLower()\`."
+            echo
+            echo "Code source : https://github.com/ChristinotLeonnel/$repo/tree/$COMMIT (licence MIT)."
+            echo "Cette version contient Gmsh ${GMSH_VERSION} (GNU GPL) : elle est distribuée, dans son ensemble, selon les termes de la GPL ; source de Gmsh jointe (\`gmsh-${GMSH_VERSION}-source.tgz\`)."
+            echo "OpenSees ${OPENSEES_VERSION} est livré sous sa propre licence (usage éducatif, de recherche et non lucratif sans accord de l'Université de Californie)."
+            echo
+            echo "Les fichiers ne sont pas signés : Windows SmartScreen peut afficher un avertissement. Les résultats de calcul doivent être vérifiés par un ingénieur qualifié."
+          } > notes.md
+          cat notes.md
+
+      - name: Release
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.product }}-v${{ inputs.version }}"
+          name=$([ "${{ inputs.product }}" = tsa ] && echo TSA || echo TSALab)
+          pre=""; case "${{ inputs.version }}" in *-*) pre="--prerelease" ;; esac
+          gh release create "$tag" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$name ${{ inputs.version }}" --notes-file notes.md $pre
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY"
+
+      # Après publication : les empreintes calculées par GitHub doivent être celles de SHA256SUMS.txt.
+      - name: Vérification après publication
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.product }}-v${{ inputs.version }}"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.assets[] | "\(.digest | ltrimstr("sha256:"))  \(.name)"' | sort -k2 > published.txt
+          grep -v SHA256SUMS.txt out/SHA256SUMS.txt | sort -k2 > expected.txt
+          grep -v SHA256SUMS.txt published.txt > published-files.txt
+          diff expected.txt published-files.txt && echo "empreintes publiées conformes"
