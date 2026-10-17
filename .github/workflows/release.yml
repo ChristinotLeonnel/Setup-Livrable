@@ -119,12 +119,15 @@ jobs:
           Copy-Item -Recurse deps/OpenSees TSA/thirdparty/
           Get-ChildItem TSA/thirdparty, TSA/thirdparty/OpenSees -Recurse -Depth 1 | Select-Object -First 20 FullName
 
+      # Qt 6.11 range ses paquets Windows par architecture : seul aqtinstall postérieur à la 3.3.0 les trouve
+      # (« Support Qt 6.11+ for Windows X64 », non encore publié) ; commit fixé pour une construction reproductible.
       - name: Qt
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
           arch: win64_msvc2022_64
           cache: true
+          aqtsource: git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7
 
       - name: Compilateur MSVC
         uses: ilammy/msvc-dev-cmd@v1
