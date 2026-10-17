@@ -44,6 +44,8 @@ jobs:
     timeout-minutes: 180
     outputs:
       commit: ${{ steps.src.outputs.commit }}
+      commit_tsa: ${{ steps.src.outputs.commit_tsa }}
+      commit_tsalab: ${{ steps.src.outputs.commit_tsalab }}
     defaults:
       run:
         shell: pwsh
@@ -57,7 +59,9 @@ jobs:
           "name=$name" >> $env:GITHUB_OUTPUT
           "repo=ChristinotLeonnel/$repo" >> $env:GITHUB_OUTPUT
 
-      # TSALab se construit sur les bibliothèques de TSA (dossier voisin ../TSA).
+      # Les deux dépôts sont toujours nécessaires : TSALab se construit sur les bibliothèques de TSA (../TSA), et
+      # TSA utilise le cœur scientifique de TSALab (../TSALab/science). Le dépôt du produit est pris à `ref`,
+      # l'autre à main ; les deux commits figurent dans les notes (code source correspondant, GPL).
       - name: Code de TSA
         uses: actions/checkout@v4
         with:
@@ -65,11 +69,10 @@ jobs:
           ref: ${{ inputs.product == 'tsa' && inputs.ref || 'main' }}
           path: TSA
       - name: Code de TSALab
-        if: inputs.product == 'tsalab'
         uses: actions/checkout@v4
         with:
           repository: ChristinotLeonnel/Tsaraloha-Structural-Analysis-Virtual-Laboratory
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.product == 'tsalab' && inputs.ref || 'main' }}
           path: TSALab
 
       - name: Commit et version
@@ -78,6 +81,12 @@ jobs:
           $dir = '${{ steps.prod.outputs.name }}'
           $commit = git -C $dir rev-parse HEAD
           "commit=$commit" >> $env:GITHUB_OUTPUT
+          "commit_tsa=$(git -C TSA rev-parse HEAD)" >> $env:GITHUB_OUTPUT
+          "commit_tsalab=$(git -C TSALab rev-parse HEAD)" >> $env:GITHUB_OUTPUT
+          # Dépôt voisin compilé dans la version : cité par licenses/Gmsh/SOURCE.txt.
+          $extra = if ($dir -eq 'TSA') { "https://github.com/ChristinotLeonnel/Tsaraloha-Structural-Analysis-Virtual-Laboratory/tree/$(git -C TSALab rev-parse HEAD)" }
+                   else { "https://github.com/ChristinotLeonnel/Tsaraloha-Structural-Analysis/tree/$(git -C TSA rev-parse HEAD)" }
+          "extra_source=$extra" >> $env:GITHUB_OUTPUT
           $declared = (Select-String -Path "$dir/product/ProductIdentity.h" -Pattern 'kVersion\[\] = "([^"]+)"').Matches[0].Groups[1].Value
           if ($declared -ne '${{ inputs.version }}') { throw "Version demandée ${{ inputs.version }} ≠ ProductIdentity.h $declared" }
           Write-Host "$dir $declared au commit $commit"
@@ -143,6 +152,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DTSA_PACKAGE_GMSH=ON
           -DTSA_SOURCE_REF=${{ steps.src.outputs.commit }}
+          -DTSA_EXTRA_SOURCE_URLS=${{ steps.src.outputs.extra_source }}
 
       - name: Compilation
         run: cmake --build build
@@ -209,6 +219,8 @@ jobs:
       - name: Notes de publication
         env:
           COMMIT: ${{ needs.windows.outputs.commit }}
+          COMMIT_TSA: ${{ needs.windows.outputs.commit_tsa }}
+          COMMIT_TSALAB: ${{ needs.windows.outputs.commit_tsalab }}
         run: |
           case "${{ inputs.product }}" in
             tsa) name=TSA; repo=Tsaraloha-Structural-Analysis ;;
@@ -221,7 +233,9 @@ jobs:
             echo "- **Version portable** : \`$name-${{ inputs.version }}-windows-x64.zip\`."
             echo "- **Empreintes SHA-256** : \`SHA256SUMS.txt\`. Vérification : \`(Get-FileHash -Algorithm SHA256 <fichier>).Hash.ToLower()\`."
             echo
-            echo "Code source : https://github.com/ChristinotLeonnel/$repo/tree/$COMMIT (licence MIT)."
+            echo "Code source (licence MIT), commits construits :"
+            echo "- TSA : https://github.com/ChristinotLeonnel/Tsaraloha-Structural-Analysis/tree/$COMMIT_TSA"
+            echo "- TSALab : https://github.com/ChristinotLeonnel/Tsaraloha-Structural-Analysis-Virtual-Laboratory/tree/$COMMIT_TSALAB"
             echo "Cette version contient Gmsh ${GMSH_VERSION} (GNU GPL) : elle est distribuée, dans son ensemble, selon les termes de la GPL ; source de Gmsh jointe (\`gmsh-${GMSH_VERSION}-source.tgz\`)."
             echo "OpenSees ${OPENSEES_VERSION} est livré sous sa propre licence (usage éducatif, de recherche et non lucratif sans accord de l'Université de Californie)."
             echo
