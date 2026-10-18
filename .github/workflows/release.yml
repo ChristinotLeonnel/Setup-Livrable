@@ -39,6 +39,8 @@ env:
   OPENSEES_VERSION: 3.8.0
   IFCOPENSHELL_VERSION: 0.9.0post1
   IFCOPENSHELL_SHA256: 2776eef7ddc0137df317f0294623523dc4ccdaba468c172232cfdda13f4e912a
+  MESA_VERSION: 26.2.3
+  MESA_SHA256: 3f3613adb43cfd0f2e665ce2400b130c275f0b3317cb3a05566320a3a67589ed
 
 jobs:
   windows:
@@ -76,6 +78,11 @@ jobs:
           repository: ChristinotLeonnel/Tsaraloha-Structural-Analysis-Virtual-Laboratory
           ref: ${{ inputs.product == 'tsalab' && inputs.ref || 'main' }}
           path: TSALab
+      # Scripts de ce dépôt (scripts/run_tests.ps1), au commit du flux lancé.
+      - name: Scripts de publication
+        uses: actions/checkout@v4
+        with:
+          path: livrable
 
       - name: Commit et version
         id: src
@@ -179,11 +186,37 @@ jobs:
       - name: Compilation
         run: cmake --build build
 
-      - name: Tests
-        env:
-          QT_QPA_PLATFORM: offscreen
-        # --no-tests=error : une suite introuvable est un échec, jamais un succès silencieux.
-        run: ctest --test-dir build --output-on-failure --no-tests=error --timeout 1800
+      # Tests en deux passes (scripts/run_tests.ps1). Les suites qui ouvrent une vraie vue 3D (OCCT) ne peuvent pas
+      # tourner sous la plateforme Qt « offscreen » (arrêt 0xC0000409, BUG-076 de TSA) : elles passent en plateforme
+      # Qt native sur le bureau de la session du runner, avec le rendu OpenGL logiciel de Mesa (pas de carte graphique).
+      # Un test sauté, une suite absente ou un total incomplet font échouer la passe native.
+      - name: Tests sans vue 3D (plateforme Qt offscreen)
+        id: tests-offscreen
+        run: ./livrable/scripts/run_tests.ps1 -BuildDir build -Platform offscreen -Product ${{ steps.prod.outputs.name }}
+
+      # Mesa (licence MIT), version et empreinte figées : seulement pour les tests, jamais dans le paquet (les deux DLL
+      # sont posées à côté de l'exécutable des tests le temps de la passe, puis retirées).
+      - name: Rendu OpenGL logiciel pour les tests (Mesa)
+        if: inputs.product == 'tsa' && (success() || steps.tests-offscreen.outcome == 'failure')
+        run: |
+          $archive = "$env:RUNNER_TEMP/mesa.7z"
+          Invoke-WebRequest "https://github.com/pal1000/mesa-dist-win/releases/download/$env:MESA_VERSION/mesa3d-$env:MESA_VERSION-release-msvc.7z" -OutFile $archive
+          if ((Get-FileHash -Algorithm SHA256 $archive).Hash -ne $env:MESA_SHA256) { throw "empreinte de Mesa $env:MESA_VERSION inattendue" }
+          7z x -y "-o$env:RUNNER_TEMP/mesa" $archive | Out-Null
+          Get-ChildItem "$env:RUNNER_TEMP/mesa/x64/opengl32.dll", "$env:RUNNER_TEMP/mesa/x64/libgallium_wgl.dll" | Format-Table Name, Length
+
+      # TSALab n'enregistre que sa suite propre (TSALab_LabTests), sans vue 3D : passe native réservée à TSA.
+      - name: Tests à vue 3D (plateforme Qt windows)
+        if: inputs.product == 'tsa' && (success() || steps.tests-offscreen.outcome == 'failure')
+        run: ./livrable/scripts/run_tests.ps1 -BuildDir build -Platform windows -Product TSA -SoftwareOpenGL "$env:RUNNER_TEMP/mesa/x64" -Log "$env:RUNNER_TEMP/tests-vue3d.log"
+
+      - name: Journal des tests à vue 3D
+        if: failure() && inputs.product == 'tsa'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-vue3d-log
+          path: ${{ runner.temp }}/tests-vue3d.log
+          if-no-files-found: warn
 
       - name: Paquet, vérification et installateur
         run: |
