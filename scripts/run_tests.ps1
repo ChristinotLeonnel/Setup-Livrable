@@ -22,7 +22,10 @@ $ErrorActionPreference = 'Stop'
 # qui n'ont pas de suite CTest propre). drawing et ifc sautent leur test de vue sous « offscreen » (419, 408) : elles
 # passent ici pour que ces tests soient réellement exécutés.
 $view3d = @('AllTests', 'auditTests', 'displayTests', 'multidocTests', 'drawingTests', 'ifcTests')
-$regex = '^' + $Product + '_(' + ($view3d -join '|') + ')$'
+# Suites à vue 3D plus récentes que certaines branches du produit : passe native si présentes, jamais exigées
+# (une version construite sur un commit antérieur ne les a pas).
+$view3dIfPresent = @('viewsTests')
+$regex = '^' + $Product + '_(' + (($view3d + $view3dIfPresent) -join '|') + ')$'
 $env:QT_QPA_PLATFORM = $Platform
 
 if ($Platform -eq 'offscreen') {
